@@ -1,0 +1,13 @@
+# Python 虚拟环境和缓存
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 本项目的生成结果和本地实验日志副本
+/outputs/
+/samples/
+
+# 本地环境配置
+.env
