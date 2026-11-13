@@ -12,6 +12,8 @@ from examples.stage3.tools import TOOLS, CaseTools
 
 import asyncio
 from typing import Protocol
+from copy import deepcopy
+from dataclasses import dataclass, field
 
 INSTRUCTIONS = """
 你是通信日志诊断学习助手，只分析当前选定案例。
@@ -48,6 +50,46 @@ class AsyncTools(Protocol):
     async def call(self, name: str, arguments: str) -> dict: ...
 
 
+@dataclass
+class AgentSession:
+    """同一案例、同一工具连接中的短期记忆；不写入会话下载文件。"""
+
+    history: list = field(default_factory=list, repr=False)
+    successful_tools: set[str] = field(default_factory=set)
+    closed: bool = False
+    owner: AsyncTools | None = field(default=None, repr=False)
+    model: str | None = None
+    running: bool = False
+
+    def begin(self, toolbox: AsyncTools, model: str) -> None:
+        if self.closed:
+            raise ValueError("这个会话已经结束；请为新任务建立新的会话和工具连接。")
+        if self.running:
+            raise ValueError("同一个会话不能同时处理两个问题。")
+        if self.owner is not None and self.owner is not toolbox:
+            raise ValueError("不能把会话复用于另一个案例或工具连接。")
+        if self.model is not None and self.model != model:
+            raise ValueError("不能在同一个会话中更换模型；请建立新会话。")
+        self.owner = toolbox
+        self.model = model
+        self.running = True
+
+
+def context_size_bytes(history: list, tools: list[dict]) -> int:
+    """计算三项上下文的本地 JSON 字节量；不是 token 数或精确 HTTP 包大小。"""
+
+    def encode(value):
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="json", exclude_none=True)
+        raise TypeError("上下文包含不能序列化的对象。")
+
+    payload = {"instructions": INSTRUCTIONS, "input": history, "tools": tools}
+    raw = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), default=encode
+    ).encode("utf-8")
+    return len(raw)
+
+
 class LocalTools:
     tools = TOOLS
     transport = "local"
@@ -68,6 +110,49 @@ async def run_agent_async(
     toolbox: AsyncTools,
     max_rounds: int = 6,
     max_tool_calls: int = 8,
+    *,
+    session: AgentSession | None = None,
+    max_context_bytes: int | None = None,
+) -> dict:
+    if (
+        not question.strip()
+        or not 1 <= max_rounds <= 12
+        or not 1 <= max_tool_calls <= 16
+    ):
+        raise ValueError("问题不能为空；模型轮数须为 1～12，工具调用上限须为 1～16。")
+    if max_context_bytes is not None and (
+        type(max_context_bytes) is not int or max_context_bytes < 1
+    ):
+        raise ValueError("上下文字节上限必须是正整数，或使用 None 不启用。")
+    active = session if session is not None else AgentSession()
+    active.begin(toolbox, model)
+    try:
+        return await _run_agent_turn(
+            client,
+            model,
+            question,
+            toolbox,
+            max_rounds,
+            max_tool_calls,
+            active,
+            max_context_bytes,
+        )
+    except BaseException:
+        active.closed = True
+        raise
+    finally:
+        active.running = False
+
+
+async def _run_agent_turn(
+    client: OpenAI,
+    model: str,
+    question: str,
+    toolbox: AsyncTools,
+    max_rounds: int,
+    max_tool_calls: int,
+    session: AgentSession,
+    max_context_bytes: int | None,
 ) -> dict:
     if (
         not question.strip()
@@ -76,12 +161,18 @@ async def run_agent_async(
     ):
         raise ValueError("问题不能为空；模型轮数须为 1～12，工具调用上限须为 1～16。")
 
-    history = [{"role": "user", "content": question}]
+    history = session.history
+    history.append({"role": "user", "content": question})
     trace = []
     tool_count = 0
-    successful_tools = set()
+    successful_tools = session.successful_tools
 
     def finish(status: str, reason: str, report: dict | None = None) -> dict:
+        if status != "completed":
+            session.closed = True
+        limits = {"max_rouns": max_rounds, "max_tool_calls": max_tool_calls}
+        if max_context_bytes is not None:
+            limits["max_context_bytes"] = max_context_bytes
         return {
             "mode": "learning_agent",
             "transport": toolbox.transport,
@@ -89,12 +180,26 @@ async def run_agent_async(
             "reason": reason,
             "report": report,
             "trace": trace,
-            "evidence": toolbox.evidence,
-            "clauses": toolbox.clauses,
-            "limits": {"max_rounds": max_rounds, "max_tool_calls": max_tool_calls},
+            "evidence": deepcopy(toolbox.evidence),
+            "clauses": deepcopy(toolbox.clauses),
+            "limits": limits,
         }
 
     for round_number in range(1, max_rounds + 1):
+        size = context_size_bytes(history, toolbox.tools)
+        trace.append(
+            {
+                "round": round_number,
+                "type": "model_request",
+                "history_items": len(history),
+                "context_bytes": size,
+                "limit": max_context_bytes,
+            }
+        )
+        if max_context_bytes is not None and size > max_context_bytes:
+            return finish(
+                "incomplete", "达到上下文字节上限；本轮未请求模型，未截断历史。"
+            )
         print(f"[模型 {round_number}/{max_rounds}] 请求中……")
         try:
             response = await asyncio.to_thread(
