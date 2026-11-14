@@ -157,6 +157,7 @@ name = "communication-diagnosis"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "langgraph" },
     { name = "mcp" },
     { name = "openai" },
     { name = "pydantic" },
@@ -182,6 +183,7 @@ dev = [
 requires-dist = [
     { name = "langchain", marker = "extra == 'langchain'", specifier = ">=1,<2" },
     { name = "langchain-openai", marker = "extra == 'langchain'", specifier = ">=1,<2" },
+    { name = "langgraph", specifier = ">=1,<2" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1,<2" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "openai", specifier = ">=2,<3" },
