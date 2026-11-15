@@ -3,18 +3,12 @@ from pathlib import Path
 from typing import Literal
 import hashlib
 import sqlite3
+from copy import deepcopy
 
-from pydantic import BaseModel, ConfigDict, ValidationError, Field
+from pydantic import  ValidationError
 
 from src.knowledge.protocol import search_protocol
-
-class ReadLogArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    role: Literal["broker", "publisher", "subscriber"]
-
-class SearchProtocolArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    query: str = Field(min_length=1, max_length=256)
+from src.tools.contracts import TOOLS, ReadLogArgs, SearchProtocolArgs
 
 class LocalTools:
     def __init__(self, case_dir:Path):
@@ -23,22 +17,38 @@ class LocalTools:
         if not root.is_dir():
             raise ValueError(f"案例目录不存在或不是文件夹：{root}")
         self.root = root
-        self.tools = [
-            {
-                "type":"function",
-                "name":"read_log",
-                "description":"读取本次案例中某一角色的日志原文片段，返回物理行号。",
-                "parameters":ReadLogArgs.model_json_schema(),
-                "strict":True,
-            },
-            {
-                "type":"function",
-                "name":"search_protocol",
-                "description":"检索 MQTT 5.0 教学摘要，支持 PUBACK、PUBLISH、Packet Identifier 等术语；结果不是正式规范原文。",
-                "parameters":SearchProtocolArgs.model_json_schema(),
-                "strict":True,
+        self.tools = deepcopy(TOOLS)
+
+    def case_manifest(self) -> dict:
+        files = {}
+        filenames = {
+            "broker": "broker.log",
+            "publisher": "publisher.json",
+            "subscriber": "subscriber.json",
+        }
+        for role, filename in filenames.items():
+            path = (self.root/filename).resolve()
+            if not path.is_relative_to(self.root):
+                raise ValueError("案例文件不能指向目录外。")
+            try:
+                with path.open("rb") as steam:
+                    raw = steam.read(1024 * 1024 + 1)
+            except FileNotFoundError:
+                files[role] = None
+                continue
+            except OSError as error:
+                raise ValueError(
+                    f"案例文件读取失败({filename}):{error}"
+                ) from error
+            if len(raw) > 1024 * 1024:
+                raise ValueError("案例中单个日志文件超过 1 MiB。")
+            files[role]={
+                "file":filename,
+                "bytes":len(raw),
+                "sha256":hashlib.sha256(raw).hexdigest()
             }
-        ]
+
+        return {"format":"communication-case-v1", "files":files}
 
     def read_log(self, role:str) -> dict:
         """读取固定角色的限量原文，返回文件名和物理行号。"""

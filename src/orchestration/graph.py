@@ -12,6 +12,10 @@ from pathlib import Path
 from src.infrastructure.llm_client import create_client, request_model
 from src.tools.local import LocalTools
 from src.models.report import DiagnosisReport
+import asyncio
+
+from src.tools.client import DEFAULT_MCP_URL, open_toolbox, open_local_toolbox
+from src.tools.contracts import AsyncToolbox
 
 # INSTRUCTIONS = """
 # 请用中文简短回答。先读日志、根据实际结果回答。"""
@@ -52,13 +56,13 @@ class AgentSession(TypedDict, total=False):
 class RunContext:
     client: OpenAI
     model: str
-    toolbox: LocalTools
+    toolbox: AsyncToolbox
     max_rounds: int = 4
     max_tool_calls:int = 4
     max_context_bytes: int = 128_000
 
 
-def call_model(state: AgentSession, runtime: Runtime[RunContext]) -> dict:
+async def call_model(state: AgentSession, runtime: Runtime[RunContext]) -> dict:
     """读取问题，调用模型，返回状态更新。"""
     context = runtime.context
     if state["model_rounds"] >= context.max_rounds:
@@ -81,7 +85,15 @@ def call_model(state: AgentSession, runtime: Runtime[RunContext]) -> dict:
         "pending_calls": [],
     }
     rounds = state["model_rounds"] + 1
-    response = request_model(context.client, context.model, state["history"], tools= context.toolbox.tools, instructions=DIAGNOSIS_INSTRUCTIONS)
+    response = await asyncio.to_thread(
+        request_model,
+        context.client,
+        context.model,
+        state["history"],
+        tools=context.toolbox.tools,
+        instructions=DIAGNOSIS_INSTRUCTIONS
+    )
+    #response = request_model(context.client, context.model, state["history"], tools= context.toolbox.tools, instructions=DIAGNOSIS_INSTRUCTIONS)
     if response.status != "completed":
         return {
             "answer": "",
@@ -167,14 +179,14 @@ def call_model(state: AgentSession, runtime: Runtime[RunContext]) -> dict:
         "model_rounds":rounds
     }
 
-def execute_tools(state: AgentSession, runtime:Runtime[RunContext]) -> dict:
+async def execute_tools(state: AgentSession, runtime:Runtime[RunContext]) -> dict:
     history = list(state["history"])
     tool_count = state["tool_count"]
     evidence = dict(state["evidence"])
     clauses = dict(state["clauses"])
     for call in state["pending_calls"]:
         tool_count+=1
-        result = runtime.context.toolbox.call(call["name"],call["arguments"])
+        result = await runtime.context.toolbox.call(call["name"],call["arguments"])
         history.append(
             {
                 "type":"function_call_output",
@@ -274,14 +286,26 @@ def build_graph():
     builder.add_edge("check_report", END)
     return builder.compile()
 
-
-def run_once(question: str, case_dir: Path) -> AgentSession:
-    """校验输入，管理客户端，执行一次图。"""
+async def run_once_async(
+    question:str,
+    case_dir:Path,
+    *,
+    transport: Literal["local", "mcp-stdio", "mcp-http"] = "mcp-http",
+    mcp_url: str = DEFAULT_MCP_URL
+) -> AgentSession:
     question = question.strip()
+    root = case_dir.resolve()
     if not question:
-        raise ValueError("缺少问题")
-    toolbox = LocalTools(case_dir)
-    client, model = create_client()
+        raise ValueError("问题不能为空")
+    if not root.is_dir():
+        raise ValueError(f"案例目录不存在或不是文件夹：{root}")
+    if transport not in ["local", "mcp-stdio", "mcp-http"]:
+        raise ValueError(f"传输方式不正确: {transport}")
+
+    if transport == "local":
+        toolbox_context = open_local_toolbox(root)
+    else:
+        toolbox_context = open_toolbox(root, transport=transport, mcp_url=mcp_url)
     initial_state:AgentSession={
         "question":question,
         "answer":"",
@@ -295,24 +319,41 @@ def run_once(question: str, case_dir: Path) -> AgentSession:
         "evidence":{},
         "report":None
     }
+
+    client,model = create_client()
     with client:
-        graph = build_graph()
-        # print(graph.get_graph().draw_mermaid())
-        result = graph.invoke(
-            initial_state,
-            context=RunContext(client, model, toolbox=toolbox),
-        )
+        async with toolbox_context as toolbox:
+            graph = build_graph()
+            result = await graph.ainvoke(
+                initial_state,
+                context=RunContext(client,model, toolbox),
+                config={"recursion_limit":20},
+            )
     return result
+
+def run_once(
+    question: str,
+    case_dir: Path,
+    *,
+    transport: Literal["local", "mcp-stdio", "mcp-http"] = "mcp-http",
+    mcp_url: str = DEFAULT_MCP_URL
+) -> AgentSession:
+    return asyncio.run(run_once_async(question,case_dir, transport=transport,mcp_url=mcp_url))
 
 
 def main() -> int:
     """终端入口：完整回答返回 0，失败返回 1。"""
     parser = argparse.ArgumentParser(description="第三步练习")
     parser.add_argument("--case-dir", type=Path, default=Path("samples/case-01"))
+    parser.add_argument("--transport", choices=("local", "mcp-stdio", "mcp-http"), default="mcp-http")
+    parser.add_argument("--mcp-url", default=DEFAULT_MCP_URL)
     args = parser.parse_args()
     try:
         question = input("请输入问题：")
-        agentsession = run_once(question, args.case_dir)
+        agentsession = run_once(question, args.case_dir, transport=args.transport, mcp_url=args.mcp_url)
+    except RuntimeError as error:
+        print(f"任务执行失败：{error}")
+        return 1
     except APIError as error:
         print(f"模型请求失败：{type(error).__name__}")
         return 1
