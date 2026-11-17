@@ -21,7 +21,8 @@ from src.tools.contracts import AsyncToolbox
 # 请用中文简短回答。先读日志、根据实际结果回答。"""
 
 DIAGNOSIS_INSTRUCTIONS=f"""
-请用中文简短回答。先读日志、根据实际结果回答。
+请用中文简短回答。
+首次诊断必须取得实际日志和适用摘要；追问可以复用本会话已经取得且足够的依据，不足时再调用工具；新增事实仍需依据，最终仍输出 DiagnosisReport JSON。
 根据问题选取一份日志，通过 read_log 获取原文。
 用 search_protocol 检索适用的摘要，依据实际工具结果回答。
 区分日志事实、协议解释和仍缺少的证据；保留“教学摘要”的身份。
@@ -245,7 +246,7 @@ def check_report(state:AgentSession) -> dict:
     if not evidence_known or not clauses_known:
         return {
             "status":"failed",
-            "reason":"报告引用了本轮未取得的日志或条款",
+            "reason":"报告引用了本会话未取得的日志或条款",
             "report":None
         }
     if not report.evidence_ids or not report.clause_ids:
@@ -269,109 +270,37 @@ def route_after_model(state:AgentSession) -> Literal["tools", "end", "report"]:
         return "report"
     return "end"
 
+def prepare_turn(state:AgentSession) -> dict:
+    history = [
+        *state.get("history",[]),
+        {"role":"user", "content": state["question"]}
+    ]
+    return {
+        "history":history,
+        "evidence":dict(state.get("evidence",{})),
+        "clauses":dict(state.get("clauses",{})),
+        "answer":"",
+        "reason":"",
+        "report":None,
+        "status":"running",
+        "pending_calls":[],
+        "model_rounds":0,
+        "tool_count":0
+    }
 
-
-def build_graph():
+def build_graph(*, checkpointer=None):
     """连接 START、模型节点和 END，返回编译后的图。"""
     builder = StateGraph(AgentSession, context_schema=RunContext)
     builder.add_node("call_model", call_model)
     builder.add_node("execute_tools", execute_tools)
     builder.add_node("check_report", check_report)
-    builder.add_edge(START, "call_model")
+    builder.add_node("prepare_turn", prepare_turn)
+    builder.add_edge(START, "prepare_turn")
+    builder.add_edge("prepare_turn","call_model")
     builder.add_conditional_edges(
         "call_model",
         route_after_model,
         {"tools":"execute_tools","end":END, "report":"check_report"})
     builder.add_edge("execute_tools", "call_model")
     builder.add_edge("check_report", END)
-    return builder.compile()
-
-async def run_once_async(
-    question:str,
-    case_dir:Path,
-    *,
-    transport: Literal["local", "mcp-stdio", "mcp-http"] = "mcp-http",
-    mcp_url: str = DEFAULT_MCP_URL
-) -> AgentSession:
-    question = question.strip()
-    root = case_dir.resolve()
-    if not question:
-        raise ValueError("问题不能为空")
-    if not root.is_dir():
-        raise ValueError(f"案例目录不存在或不是文件夹：{root}")
-    if transport not in ["local", "mcp-stdio", "mcp-http"]:
-        raise ValueError(f"传输方式不正确: {transport}")
-
-    if transport == "local":
-        toolbox_context = open_local_toolbox(root)
-    else:
-        toolbox_context = open_toolbox(root, transport=transport, mcp_url=mcp_url)
-    initial_state:AgentSession={
-        "question":question,
-        "answer":"",
-        "history":[{"role":"user", "content":question}],
-        "model_rounds":0,
-        "pending_calls":[],
-        "reason":"",
-        "tool_count":0,
-        "status":"running",
-        "clauses":{},
-        "evidence":{},
-        "report":None
-    }
-
-    client,model = create_client()
-    with client:
-        async with toolbox_context as toolbox:
-            graph = build_graph()
-            result = await graph.ainvoke(
-                initial_state,
-                context=RunContext(client,model, toolbox),
-                config={"recursion_limit":20},
-            )
-    return result
-
-def run_once(
-    question: str,
-    case_dir: Path,
-    *,
-    transport: Literal["local", "mcp-stdio", "mcp-http"] = "mcp-http",
-    mcp_url: str = DEFAULT_MCP_URL
-) -> AgentSession:
-    return asyncio.run(run_once_async(question,case_dir, transport=transport,mcp_url=mcp_url))
-
-
-def main() -> int:
-    """终端入口：完整回答返回 0，失败返回 1。"""
-    parser = argparse.ArgumentParser(description="第三步练习")
-    parser.add_argument("--case-dir", type=Path, default=Path("samples/case-01"))
-    parser.add_argument("--transport", choices=("local", "mcp-stdio", "mcp-http"), default="mcp-http")
-    parser.add_argument("--mcp-url", default=DEFAULT_MCP_URL)
-    args = parser.parse_args()
-    try:
-        question = input("请输入问题：")
-        agentsession = run_once(question, args.case_dir, transport=args.transport, mcp_url=args.mcp_url)
-    except RuntimeError as error:
-        print(f"任务执行失败：{error}")
-        return 1
-    except APIError as error:
-        print(f"模型请求失败：{type(error).__name__}")
-        return 1
-    except ValueError as error:
-        print(f"输入或配置错误：{error}")
-        return 1
-    if agentsession["status"] == "completed":
-        report = agentsession["report"]
-        print(json.dumps(report, ensure_ascii=False, indent=2))
-        for evidence_id in report["evidence_ids"]:
-            print(agentsession["evidence"][evidence_id])
-        for clause_id in report["clause_ids"]:
-            print(agentsession["clauses"][clause_id])
-        return 0
-
-    print(f"执行失败： {agentsession['reason']}")
-    return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return builder.compile(checkpointer=checkpointer)
