@@ -2,20 +2,22 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+
 def save_result(result: dict) -> Path:
     output_dir = Path("outputs/runs")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_file = output_dir / f"{result["run_id"]}.json"
+    output_file = output_dir / f"{result['run_id']}.json"
     content = json.dumps(result, ensure_ascii=False, indent=2)
     output_file.write_text(content, encoding="utf-8")
 
     return output_file
 
+
 def write_case_snapshot(
-        case_id:str,
-        files:dict[str, bytes],
-        output_root:Path = Path("outputs/cases"),
+    case_id: str,
+    files: dict[str, bytes],
+    output_root: Path = Path("outputs/cases"),
 ) -> Path:
     try:
         base = output_root.resolve()
@@ -26,8 +28,8 @@ def write_case_snapshot(
             raise ValueError("案例目录不能指向保存目录外。")
 
         for file_name in files:
-            if(
-                file_name in ("",".","..")
+            if (
+                file_name in ("", ".", "..")
                 or "/" in file_name
                 or "\\" in file_name
                 or ":" in file_name
@@ -69,6 +71,3 @@ def write_case_snapshot(
         return root
     except OSError as error:
         raise ValueError(f"案例文件保存或读取失败：{error}") from error
-       
-
-   

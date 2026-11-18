@@ -27,23 +27,20 @@ def request_model(
     model: str,
     history: list[dict],
     *,
-    tools:list[dict] | None = None,
+    tools: list[dict] | None = None,
     instructions: str = INSTRUCTIONS,
+    max_output_tokens: int = 4096,
 ) -> Response:
     """发送输入，保留完整响应给调用方。"""
     params = {
-        "model":model,
-        "input":history,
-        "instructions":instructions,
-        "store":False,
-        "max_output_tokens":4096,
+        "model": model,
+        "input": history,
+        "instructions": instructions,
+        "store": False,
+        "max_output_tokens": max_output_tokens,
     }
     if tools is not None:
-        params.update(
-            tools=tools,
-            tool_choice = "auto",
-            parallel_tool_calls=False
-        )
+        params.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
     return client.responses.create(**params)
 
 
