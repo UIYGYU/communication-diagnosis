@@ -5,17 +5,22 @@ from pathlib import Path
 from src.application.service import analyze, create_session
 from src.models.request import CaseConfig, TurnRequest
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="同案例连续诊断")
     parser.add_argument("--case-dir", type=Path, default=Path("samples/case-01"))
     parser.add_argument(
-        "--transport", choices=("local", "mcp-stdio", "mcp-http"),
-        default="mcp-http"
+        "--transport", choices=("local", "mcp-stdio", "mcp-http"), default="mcp-http"
     )
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8000/mcp")
+    parser.add_argument("--context-bytes", type=int, default=128_000)
     args = parser.parse_args()
     try:
-        session = create_session(CaseConfig(case_dir=args.case_dir, transport=args.transport, mcp_url=args.mcp_url))
+        session = create_session(
+            CaseConfig(
+                case_dir=args.case_dir, transport=args.transport, mcp_url=args.mcp_url
+            )
+        )
     except ValueError:
         print("创建会话失败")
         return 1
@@ -24,7 +29,9 @@ def main() -> int:
         if not question:
             return 0
         try:
-            request = TurnRequest(question=question)
+            request = TurnRequest(
+                question=question, max_context_bytes=args.context_bytes
+            )
         except ValueError as error:
             print(f"问题输入有误：{error}")
             continue
@@ -39,5 +46,6 @@ def main() -> int:
             print("当前会话已失效，请重新运行程序。")
             return 1
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     raise SystemExit(main())

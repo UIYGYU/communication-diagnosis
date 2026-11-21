@@ -8,10 +8,11 @@ from typing import Annotated, Any, Literal
 from mcp.server import MCPServer
 from pydantic import Field
 
-from src.tools.contracts import ReadLogArgs,SearchProtocolArgs
+from src.tools.contracts import ReadLogArgs, SearchProtocolArgs
 from src.tools.local import LocalTools
 
-def create_server(case_dir:Path) -> MCPServer:
+
+def create_server(case_dir: Path) -> MCPServer:
     core = LocalTools(case_dir)
     server = MCPServer("通信诊断助手工具", version="0.2.0")
 
@@ -21,16 +22,19 @@ def create_server(case_dir:Path) -> MCPServer:
         return json.dumps(core.case_manifest(), ensure_ascii=False)
 
     @server.tool()
-    def read_log(role:Literal["broker", "publisher", "subscriber"]) -> dict[str,Any]:
+    def read_log(role: Literal["broker", "publisher", "subscriber"]) -> dict[str, Any]:
         args = ReadLogArgs(role=role)
         return core.call("read_log", args.model_dump_json())
 
     @server.tool()
-    def search_protocol(query:Annotated[str, Field(min_length=1, max_length=256)]) -> dict[str, Any]:
+    def search_protocol(
+        query: Annotated[str, Field(min_length=1, max_length=256)],
+    ) -> dict[str, Any]:
         args = SearchProtocolArgs(query=query)
         return core.call("search_protocol", args.model_dump_json())
 
     return server
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="服务器启动")
@@ -40,8 +44,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         server = create_server(args.case_dir)
-        if args.transport=="http":
-            server.run(transport="streamable-http", host="127.0.0.1", port=args.port, streamable_http_path="/mcp")
+        if args.transport == "http":
+            server.run(
+                transport="streamable-http",
+                host="127.0.0.1",
+                port=args.port,
+                streamable_http_path="/mcp",
+            )
             return 0
         else:
             server.run(transport="stdio")
@@ -49,6 +58,7 @@ def main() -> int:
     except (OSError, ValueError) as error:
         print(f"服务启动失败：{error}", file=sys.stderr)
         return 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

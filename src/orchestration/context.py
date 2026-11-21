@@ -5,12 +5,14 @@ import json
 import re
 from typing import Any
 
+
 class ContextBudgetError(ValueError):
     """完整输入在当前策略下无法放入预算。"""
 
     def __init__(self, message: str, *, can_summarize: bool = False):
         super().__init__(message)
         self.can_summarize = can_summarize
+
 
 @dataclass(frozen=True)
 class ContextPolicy:
@@ -22,11 +24,13 @@ class ContextPolicy:
     max_summary_output_tokens: int = 1_200
     max_summary_calls: int = 1
 
+
 @dataclass(frozen=True)
 class TurnSpan:
-    number:int
-    start:int
-    end:int
+    number: int
+    start: int
+    end: int
+
 
 @dataclass
 class PreparedContext:
@@ -35,38 +39,36 @@ class PreparedContext:
     visible_evidence_ids: list[str]
     visible_clause_ids: list[str]
 
+
 def payload_bytes(
-    input_items:list[dict],
-    tools:list[dict] | None,
-    instructions:str,
+    input_items: list[dict],
+    tools: list[dict] | None,
+    instructions: str,
 ):
-    result:dict[str, Any] = {}
+    result: dict[str, Any] = {}
     result["input"] = input_items
     result["instructions"] = instructions
     if tools is not None:
         result["tools"] = tools
     return len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
 
-def split_turns(history:list[dict]) -> list[TurnSpan]:
+
+def split_turns(history: list[dict]) -> list[TurnSpan]:
     if not history:
         return []
-    starts = [
-        index
-        for index, item in enumerate(history)
-        if item.get("role") == "user"
-    ]
+    starts = [index for index, item in enumerate(history) if item.get("role") == "user"]
     if not starts or starts[0] != 0:
         raise ValueError("history 必须从用户问题开始")
     ends = starts[1:] + [len(history)]
-    spans =  [
+    spans = [
         TurnSpan(number=number, start=start, end=end)
         for number, (start, end) in enumerate(zip(starts, ends), start=1)
     ]
-    seen_ids:set[str] = set()
+    seen_ids: set[str] = set()
     for span in spans:
-        pending_ids:set[str] = set()
+        pending_ids: set[str] = set()
 
-        for item in history[span.start:span.end]:
+        for item in history[span.start : span.end]:
             kind = item.get("type")
             if kind not in ("function_call", "function_call_output"):
                 continue
@@ -83,7 +85,9 @@ def split_turns(history:list[dict]) -> list[TurnSpan]:
 
             if kind == "function_call_output":
                 if call_id not in pending_ids:
-                    raise ValueError(f"第 {span.number} 轮有未配对或重复的结果：{call_id}")
+                    raise ValueError(
+                        f"第 {span.number} 轮有未配对或重复的结果：{call_id}"
+                    )
                 pending_ids.remove(call_id)
 
         if pending_ids:
@@ -93,12 +97,12 @@ def split_turns(history:list[dict]) -> list[TurnSpan]:
 
 
 def select_materials(
-        question:str,
-        evidence:dict[str, dict],
-        clauses:dict[str,dict],
-        *,
-        max_bytes:int,
-        fits_input:Callable[[dict],bool]
+    question: str,
+    evidence: dict[str, dict],
+    clauses: dict[str, dict],
+    *,
+    max_bytes: int,
+    fits_input: Callable[[dict], bool],
 ) -> dict:
     question = question.casefold()
     mentioned_ids = set(re.findall(r"[a-z0-9_-]+", question))
@@ -153,6 +157,7 @@ def select_materials(
 
     return selected
 
+
 def source_ids(history_suffix: list[dict]) -> tuple[set[str], set[str]]:
     tool_names = {}
     for item in history_suffix:
@@ -181,7 +186,8 @@ def source_ids(history_suffix: list[dict]) -> tuple[set[str], set[str]]:
             for clause in result["clauses"]:
                 clause_ids.add(clause["clause_id"])
 
-    return evidence_ids,clause_ids
+    return evidence_ids, clause_ids
+
 
 def build_model_context(
     *,
@@ -195,7 +201,7 @@ def build_model_context(
     if not spans or policy.keep_recent_turns < 1:
         raise ValueError("至少需要一个用户轮次，保留轮数至少为 1")
 
-    recent_start = spans[-policy.keep_recent_turns:][0].start
+    recent_start = spans[-policy.keep_recent_turns :][0].start
     start = 0 if summary is None else summary["covered_until"]
     input_items = deepcopy(history[start:])
     if summary is not None:
@@ -217,12 +223,12 @@ def build_model_context(
     return PreparedContext(
         input_items=input_items,
         record={
-            "kind":"context",
-            "input_bytes":input_bytes,
-            "limit_bytes":limit,
-            "history_range":[start, len(history)],
+            "kind": "context",
+            "input_bytes": input_bytes,
+            "limit_bytes": limit,
+            "history_range": [start, len(history)],
             "summary_until": start,
         },
         visible_clause_ids=sorted(clause_ids),
-        visible_evidence_ids=sorted(evidence_ids)
+        visible_evidence_ids=sorted(evidence_ids),
     )

@@ -39,15 +39,16 @@ CLAUSES = [
 ]
 TERMS = {"确认": "PUBACK", "发布": "PUBLISH", "标识符": "Packet Identifier"}
 
-def make_match_query(query:str) -> str:
+
+def make_match_query(query: str) -> str:
     expanded = query
     hits = [key for key in TERMS if key in expanded]
-    hits.sort(key=len,reverse=True)
+    hits.sort(key=len, reverse=True)
     for key in hits:
         expanded = expanded.replace(key, f"{key} {TERMS[key]} ")
 
     words = re.findall(r"[a-z0-9]+", expanded.casefold())
-    unique_words=[]
+    unique_words = []
 
     for word in words:
         if word not in unique_words:
@@ -59,16 +60,13 @@ def make_match_query(query:str) -> str:
         quoted_words.append(f'"{word}"')
     return " OR ".join(quoted_words)
 
-def search_protocol(query:str) -> dict:
+
+def search_protocol(query: str) -> dict:
     """检索固定 MQTT 5.0 教学摘要，返回最多三条及来源信息。"""
     # 1. 原始问题先变成 FTS 查询字符串。
     match_query = make_match_query(query)
     if not match_query:
-        return {
-            "ok":True,
-            "clauses":[],
-            "note":"请换用 PUBACK、PUBLISH 等术语。"
-        }
+        return {"ok": True, "clauses": [], "note": "请换用 PUBACK、PUBLISH 等术语。"}
     # 2. 创建本次检索的内存数据库；它不会生成磁盘数据库文件。
     connection = sqlite3.connect(":memory:")
     try:
@@ -82,14 +80,10 @@ def search_protocol(query:str) -> dict:
         # 4. 把 Python 列表中的三条资料放入索引。
         insert_rows = []
         for clause in CLAUSES:
-            insert_rows.append((
-                clause["clause_id"],
-                clause["title"],
-                clause["text"]
-            ))
+            insert_rows.append((clause["clause_id"], clause["title"], clause["text"]))
         connection.executemany(
             "INSERT INTO clause_fts (clause_id, title, text) VALUES (?, ?, ?)",
-            insert_rows
+            insert_rows,
         )
 
         # 5. 查询命中的 ID。fetchall 在连接关闭前取回结果。
@@ -100,7 +94,7 @@ def search_protocol(query:str) -> dict:
         ).fetchall()
 
         # 6. 根据 ID，从 CLAUSES 找回完整资料，包括版本和来源。
-        found=[]
+        found = []
         for row in rows:
             clause_id = row[0]
             for clause in CLAUSES:
@@ -109,14 +103,15 @@ def search_protocol(query:str) -> dict:
 
         # 7. 返回给调用者的统一结构。
         return {
-            "ok":True,
-            "clauses":found,
-            "note":"检索范围为 MQTT 5.0 教学摘要；未命中不代表规范没有要求。"
+            "ok": True,
+            "clauses": found,
+            "note": "检索范围为 MQTT 5.0 教学摘要；未命中不代表规范没有要求。",
         }
     finally:
         connection.close()
 
-def main()->int:
+
+def main() -> int:
     try:
         result = search_protocol("PUBACK")
     except sqlite3.Error as error:
@@ -124,6 +119,7 @@ def main()->int:
         return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

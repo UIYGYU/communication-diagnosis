@@ -1,4 +1,4 @@
-import json 
+import json
 from pathlib import Path
 
 import streamlit as st
@@ -19,7 +19,7 @@ with st.form("case_config"):
     source = st.radio("案例输入", ["现有目录", "上传日志"])
     broker_file = st.file_uploader("服务端日志", type=["log", "txt"], max_upload_size=1)
     publisher_file = st.file_uploader("发布端记录", type=["json"], max_upload_size=1)
-    subscriber_file = st.file_uploader("订阅端记录", type = ["json"], max_upload_size=1)
+    subscriber_file = st.file_uploader("订阅端记录", type=["json"], max_upload_size=1)
     case_dir_text = st.text_input("案例目录", "samples/case-01")
     transport = st.selectbox("工具连接", ["mcp-http", "mcp-stdio", "local"])
     mcp_url = st.text_input("HTTP MCP 地址", "http://127.0.0.1:8000/mcp")
@@ -36,7 +36,13 @@ if new_session:
             ):
                 if uploaded_file is None:
                     continue
-                files.append(UploadedLog(role=role, file_name=uploaded_file.name, content=uploaded_file.getvalue()))
+                files.append(
+                    UploadedLog(
+                        role=role,
+                        file_name=uploaded_file.name,
+                        content=uploaded_file.getvalue(),
+                    )
+                )
             caseupload = CaseUpload(files=files)
             case_dir = materialize_case(caseupload)
         else:
@@ -46,7 +52,7 @@ if new_session:
         session = create_session(config)
 
         st.session_state.diagnosis_session = session
-        st.success("会话已创建")    
+        st.success("会话已创建")
 
     except (ValidationError, ValueError) as error:
         st.error(str(error))
@@ -108,23 +114,37 @@ for index, result in enumerate(session.turns, start=1):
         st.json(result["call_trace"])
 
     with st.expander("查看输入身份"):
-        st.json({
-            "run_id":result["run_id"],
-            "thread_id":result["thread_id"],
-            "case_id":result["case_id"]
-        })
+        st.json(
+            {
+                "run_id": result["run_id"],
+                "thread_id": result["thread_id"],
+                "case_id": result["case_id"],
+            }
+        )
     if result.get("storage_warning"):
         st.warning(result["storage_warning"])
 
+    with st.expander("查看本问题上下文与预算"):
+        st.json(
+            {
+                "summary": result.get("summary"),
+                "summary_calls": result.get("summary_calls", 0),
+                "visible_evidence_ids": result.get("visible_evidence_ids", []),
+                "visible_clause_ids": result.get("visible_clause_ids", []),
+                "history_archive": result.get("history_archive"),
+                "context_trace": result.get("context_trace", []),
+            }
+        )
+
     st.download_button(
         "下载本次报告与轨迹",
-        data = json.dumps(result, ensure_ascii=False, indent=2),
+        data=json.dumps(result, ensure_ascii=False, indent=2),
         file_name=f"diagnosis-{result['run_id']}.json",
         mime="application/json",
-        key = f"download-{result['run_id']}",
+        key=f"download-{result['run_id']}",
         on_click="ignore",
     )
-        
+
 
 if not session.usable:
     st.warning("当前会话无法继续使用，请新建会话。")

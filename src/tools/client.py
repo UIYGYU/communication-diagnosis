@@ -18,25 +18,23 @@ from src.tools.local import LocalTools
 TIMEOUT_SECONDS = 15
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp"
 
-def tool_error(code:str, message:str) -> dict:
-    return {
-        "ok":False,
-        "error":code,
-        "message":message
-    }
 
-def without_annotations(value:Any) -> Any:
+def tool_error(code: str, message: str) -> dict:
+    return {"ok": False, "error": code, "message": message}
+
+
+def without_annotations(value: Any) -> Any:
     if isinstance(value, dict):
         result = {}
 
-        for key,item in value.items():
+        for key, item in value.items():
             if key in ("title", "description"):
                 continue
 
             result[key] = without_annotations(item)
         return result
     if isinstance(value, list):
-        result=[]
+        result = []
 
         for item in value:
             result.append(without_annotations(item))
@@ -44,9 +42,10 @@ def without_annotations(value:Any) -> Any:
         return result
     return value
 
-def validate_discovered_tools(listed:Any) -> None:
+
+def validate_discovered_tools(listed: Any) -> None:
     remote = {tool.name: tool.input_schema for tool in listed.tools}
-    expected = {tool["name"] : tool["parameters"] for tool in TOOLS}
+    expected = {tool["name"]: tool["parameters"] for tool in TOOLS}
     if listed.next_cursor is not None:
         raise ValueError("工具列表存在下一页，当前未取得完整清单。")
 
@@ -55,44 +54,41 @@ def validate_discovered_tools(listed:Any) -> None:
 
     if set(remote) != set(expected):
         raise ValueError("服务端工具名称与本地约定不一致。")
-    
-    for name,schema in expected.items():
+
+    for name, schema in expected.items():
         actual = remote[name]
 
         if actual.get("type") != schema.get("type"):
             raise ValueError(f"工具 {name} 的参数根类型不一致。")
 
-        if set(actual.get("required", [])) != set(
-            schema.get("required", [])
-        ):
+        if set(actual.get("required", [])) != set(schema.get("required", [])):
             raise ValueError(f"工具 {name} 的必填参数不一致。")
 
-        actual_properties = without_annotations(
-            actual.get("properties", {})
-        )
+        actual_properties = without_annotations(actual.get("properties", {}))
 
-        expected_properties = without_annotations(
-            schema.get("properties", {})
-        )
+        expected_properties = without_annotations(schema.get("properties", {}))
 
         if actual_properties != expected_properties:
             raise ValueError(f"工具 {name} 的参数约束不一致。")
 
+
 class MCPTools:
-    def __init__(self, client: Client, *, transport: str, manifest:dict):
+    def __init__(self, client: Client, *, transport: str, manifest: dict):
         self.client = client
         self.transport = transport
         self.tools = deepcopy(TOOLS)
         self.expected_files = manifest["files"]
 
-    async def call(self, name:str, arguments:str) -> dict:
+    async def call(self, name: str, arguments: str) -> dict:
         model = ARGUMENT_MODELS.get(name)
-        if  not model:
+        if not model:
             return tool_error("unknown_tool", "未知工具")
         try:
             args = model.model_validate_json(arguments)
         except (ValidationError, TypeError):
-            return tool_error("invalid_arguments", "工具参数不符合要求，未发送 MCP 请求。")
+            return tool_error(
+                "invalid_arguments", "工具参数不符合要求，未发送 MCP 请求。"
+            )
 
         try:
             async with asyncio.timeout(TIMEOUT_SECONDS):
@@ -106,15 +102,15 @@ class MCPTools:
             return tool_error("mcp_failed", "MCP 服务端拒绝本次调用。")
 
         data = result.structured_content
-        if not isinstance(data,dict) or type(data.get("ok")) is not bool:
+        if not isinstance(data, dict) or type(data.get("ok")) is not bool:
             return tool_error("invalid_result", "工具结果必须包含布尔类型的 ok。")
 
         if not data["ok"]:
             return data
-        if name=="read_log":
+        if name == "read_log":
             string_fields = ("role", "file", "input_sha256")
 
-            if(
+            if (
                 not all(isinstance(data.get(key), str) for key in string_fields)
                 or type(data.get("truncated")) is not bool
                 or not isinstance(data.get("lines"), list)
@@ -122,7 +118,7 @@ class MCPTools:
                 return tool_error("invalid_result", "日志结果的字段或类型不正确。")
 
             for row in data["lines"]:
-                if(
+                if (
                     not isinstance(row, dict)
                     or not isinstance(row.get("evidence_id"), str)
                     or not row["evidence_id"].strip()
@@ -130,12 +126,14 @@ class MCPTools:
                     or row["line"] <= 0
                     or not isinstance(row.get("text"), str)
                 ):
-                    return tool_error("invalid_result", "日志行的引用、行号或文本不正确。")
+                    return tool_error(
+                        "invalid_result", "日志行的引用、行号或文本不正确。"
+                    )
             if data["role"] != args.role:
                 return tool_error("invalid_result", "返回的日志角色与请求不一致。")
 
             expected = self.expected_files.get(args.role)
-            if(
+            if (
                 not isinstance(expected, dict)
                 or data["file"] != expected["file"]
                 or data["input_sha256"] != expected["sha256"]
@@ -159,26 +157,28 @@ class MCPTools:
             )
 
             for clause in data["clauses"]:
-                if(
-                    not isinstance(clause,dict)
+                if (
+                    not isinstance(clause, dict)
                     or not isinstance(clause.get("clause_id"), str)
                     or not clause["clause_id"].strip()
                     or not all(
-                        isinstance(clause.get(key), str)
-                        for key in string_fields
+                        isinstance(clause.get(key), str) for key in string_fields
                     )
                 ):
-                    return tool_error("invalid_result", "协议条目缺少字段或类型不正确。")
+                    return tool_error(
+                        "invalid_result", "协议条目缺少字段或类型不正确。"
+                    )
 
         return data
 
+
 @asynccontextmanager
 async def open_toolbox(
-    case_dir:Path,
+    case_dir: Path,
     *,
     transport: Literal["mcp-stdio", "mcp-http"] = "mcp-http",
-    mcp_url:str = DEFAULT_MCP_URL,
-)->AsyncGenerator[MCPTools, None]:
+    mcp_url: str = DEFAULT_MCP_URL,
+) -> AsyncGenerator[MCPTools, None]:
     root = case_dir.resolve()
     core = LocalTools(root)
     expected_manifest = await asyncio.to_thread(core.case_manifest)
@@ -186,8 +186,15 @@ async def open_toolbox(
         target = StdioServerParameters(
             command=sys.executable,
             args=[
-                "-B", "-X", "utf8", "-m", "src.tools.server",
-                "--case-dir", str(root), "--transport", "stdio",
+                "-B",
+                "-X",
+                "utf8",
+                "-m",
+                "src.tools.server",
+                "--case-dir",
+                str(root),
+                "--transport",
+                "stdio",
             ],
             cwd=str(Path(__file__).resolve().parents[2]),
             env={},
@@ -195,7 +202,7 @@ async def open_toolbox(
     elif transport == "mcp-http":
         address = urlsplit(mcp_url)
         port = address.port
-        if(
+        if (
             address.scheme != "http"
             or address.hostname != "127.0.0.1"
             or port is None
@@ -249,26 +256,29 @@ async def open_toolbox(
     if failure is not None:
         raise failure
 
-#不走mcp的场景
+
+# 不走mcp的场景
 class AsyncLocalTools:
-    def __init__(self, case_dir:Path):
+    def __init__(self, case_dir: Path):
         self.core = LocalTools(case_dir)
         self.tools = self.core.tools
         self.transport = "local"
 
-    async def call(self, name:str, arguments:str) -> dict:
+    async def call(self, name: str, arguments: str) -> dict:
         return await asyncio.to_thread(self.core.call, name, arguments)
 
+
 @asynccontextmanager
-async def open_local_toolbox(case_dir:Path) -> AsyncGenerator[AsyncLocalTools, None]:
+async def open_local_toolbox(case_dir: Path) -> AsyncGenerator[AsyncLocalTools, None]:
     yield AsyncLocalTools(case_dir)
 
+
 async def check_connection(
-        case_dir:Path,
-        *,
-        transport: Literal["mcp-stdio", "mcp-http"] = "mcp-http",
-        mcp_url: str = DEFAULT_MCP_URL,
-)->None:
+    case_dir: Path,
+    *,
+    transport: Literal["mcp-stdio", "mcp-http"] = "mcp-http",
+    mcp_url: str = DEFAULT_MCP_URL,
+) -> None:
     local = LocalTools(case_dir)
     checks = [
         ("read_log", {"role": "broker"}),
@@ -286,33 +296,36 @@ async def check_connection(
                 )
 
             if actual.get("ok") is not True:
-                raise RuntimeError(
-                    f"MCP 工具 {name} 调用失败：{actual.get('message')}"
-                )
+                raise RuntimeError(f"MCP 工具 {name} 调用失败：{actual.get('message')}")
 
             if actual != expected:
                 raise RuntimeError(f"工具 {name} 的本地与 MCP 结果不一致。")
-        test = await toolbox.call("test","test")
-        if (
-            test.get("ok") is not False
-            or  test.get("error") != "unknown_tool"
-        ):
+        test = await toolbox.call("test", "test")
+        if test.get("ok") is not False or test.get("error") != "unknown_tool":
             raise RuntimeError("未知工具未按预期被拒绝。")
-            
+
     print("连通验证完成；HTTP 服务会继续运行。本步骤未请求模型。")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="验证 MCP 工具连接")
     parser.add_argument("--case-dir", type=Path, default=Path("samples/case-01"))
-    parser.add_argument("--transport", choices=("mcp-stdio", "mcp-http"), default="mcp-http")
+    parser.add_argument(
+        "--transport", choices=("mcp-stdio", "mcp-http"), default="mcp-http"
+    )
     parser.add_argument("--mcp-url", default=DEFAULT_MCP_URL)
     args = parser.parse_args()
     try:
-        asyncio.run(check_connection(args.case_dir, transport=args.transport, mcp_url=args.mcp_url))
+        asyncio.run(
+            check_connection(
+                args.case_dir, transport=args.transport, mcp_url=args.mcp_url
+            )
+        )
     except (ValueError, RuntimeError) as error:
         print(error)
         return 1
     return 0
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     raise SystemExit(main())

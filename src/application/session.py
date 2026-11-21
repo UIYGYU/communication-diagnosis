@@ -6,6 +6,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from src.models.request import Transport
 
+
 @dataclass
 class DiagnosisSession:
     thread_id: str
@@ -15,7 +16,7 @@ class DiagnosisSession:
     transport: Transport
     mcp_url: str
     graph: CompiledStateGraph
-    saver:InMemorySaver
+    saver: InMemorySaver
     model_id: str | None = None
     busy: bool = False
     usable: bool = True

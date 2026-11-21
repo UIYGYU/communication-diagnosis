@@ -7,8 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.infrastructure.llm_client import request_model
 from src.orchestration.context import (
-    ContextBudgetError, ContextPolicy, payload_bytes, source_ids, split_turns
+    ContextBudgetError,
+    ContextPolicy,
+    payload_bytes,
+    source_ids,
+    split_turns,
 )
+
 
 class SummaryError(ValueError):
     """摘要响应无效，但已经发生的请求和用量仍需记录。"""
@@ -16,6 +21,7 @@ class SummaryError(ValueError):
     def __init__(self, message: str, *, record: dict):
         super().__init__(message)
         self.record = record
+
 
 class SummaryPoint(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -26,12 +32,14 @@ class SummaryPoint(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list, max_length=8)
     clause_ids: list[str] = Field(default_factory=list, max_length=8)
 
+
 class SummaryContent(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     points: list[SummaryPoint] = Field(max_length=12)
 
-SUMMARY_INSTRUCTIONS=f"""
+
+SUMMARY_INSTRUCTIONS = f"""
 压缩给定的旧对话资料，只输出符合 SummaryContent 的 JSON。
 保留仍相关的任务目标、有证据的观察、已执行动作及结果、未决问题。
 历史推断使用 inference，不能因为重复出现而改成 observation。
@@ -42,18 +50,19 @@ observation 必须写出资料里的日志或条款 ID，无法支持的内容�
 SummaryContent的格式为{SummaryContent.model_json_schema()}
 """
 
+
 def make_summary_source(
-        history:list[dict],
-        summary:dict | None,
-        *,
-        keep_recent_turns: int,
+    history: list[dict],
+    summary: dict | None,
+    *,
+    keep_recent_turns: int,
 ) -> tuple[dict, int]:
     if keep_recent_turns < 1:
         raise ValueError("剩余执行轮次小于1")
     spans = split_turns(history)
     if len(spans) <= keep_recent_turns:
         raise ContextBudgetError("没有可压缩的新增旧轮次")
-    
+
     cutoff = spans[-keep_recent_turns].start
     covered_until = 0
     previous_summary = None
@@ -72,22 +81,21 @@ def make_summary_source(
 
         items = [
             item
-            for item in history[span.start:span.end]
+            for item in history[span.start : span.end]
             if item.get("role") == "user"
-            or item.get("type") in (
-                "message",
-                "function_call",
-                "function_call_output"
-            )
+            or item.get("type") in ("message", "function_call", "function_call_output")
         ]
-        new_turns.append({
-            "number":span.number,
-            "history_range":[span.start, span.end],
-            "items":items
-        })
+        new_turns.append(
+            {
+                "number": span.number,
+                "history_range": [span.start, span.end],
+                "items": items,
+            }
+        )
 
-    source = {"previous_summary":previous_summary, "new_turns":new_turns}
+    source = {"previous_summary": previous_summary, "new_turns": new_turns}
     return source, cutoff
+
 
 async def generate_summary(
     client: OpenAI,
@@ -97,12 +105,14 @@ async def generate_summary(
     policy: ContextPolicy,
 ) -> tuple[dict, dict]:
     source_text = json.dumps(source, ensure_ascii=False)
-    input_item = [{"role":"user", "content":source_text}]
-    input_bytes = payload_bytes(input_items=input_item, tools=None, instructions=SUMMARY_INSTRUCTIONS)
+    input_item = [{"role": "user", "content": source_text}]
+    input_bytes = payload_bytes(
+        input_items=input_item, tools=None, instructions=SUMMARY_INSTRUCTIONS
+    )
     limit_bytes = policy.max_summary_input_bytes
     if input_bytes > limit_bytes:
         raise ContextBudgetError("摘要输入超过字节上限")
-    
+
     record = {"input_bytes": input_bytes, "limit_bytes": limit_bytes, "usage": None}
     try:
         response = await asyncio.to_thread(
@@ -112,7 +122,7 @@ async def generate_summary(
             input_item,
             tools=None,
             instructions=SUMMARY_INSTRUCTIONS,
-            max_output_tokens = policy.max_summary_output_tokens
+            max_output_tokens=policy.max_summary_output_tokens,
         )
     except APIError as error:
         label = type(error).__name__
@@ -175,5 +185,3 @@ async def generate_summary(
         raise SummaryError("摘要内容超过字节上限", record=record)
 
     return result, record
-
-    

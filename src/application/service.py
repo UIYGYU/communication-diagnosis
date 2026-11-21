@@ -8,13 +8,15 @@ from openai import APIError
 from src.application.cases import make_case_id
 from src.application.session import DiagnosisSession
 from src.infrastructure.llm_client import create_client
-from src.infrastructure.storage import save_result
+from src.infrastructure.storage import save_result, save_history_segment
 from src.models.request import CaseConfig, TurnRequest
-from src.orchestration.graph import RunContext,build_graph
+from src.orchestration.graph import RunContext, build_graph
+from src.orchestration.context import ContextPolicy
 from src.tools.client import open_local_toolbox, open_toolbox
 from src.tools.local import LocalTools
 
-def create_session(config:CaseConfig) -> DiagnosisSession:
+
+def create_session(config: CaseConfig) -> DiagnosisSession:
     root = config.case_dir.resolve()
     manifest = LocalTools(root).case_manifest()
     if all(value is None for value in manifest["files"].values()):
@@ -29,8 +31,9 @@ def create_session(config:CaseConfig) -> DiagnosisSession:
         transport=config.transport,
         mcp_url=config.mcp_url,
         saver=saver,
-        graph=graph
+        graph=graph,
     )
+
 
 def collect_calls(history: list[dict], start: int) -> list[dict]:
     calls: dict[str, dict] = {}
@@ -38,47 +41,58 @@ def collect_calls(history: list[dict], start: int) -> list[dict]:
     for output in history[start:]:
         if output.get("type") == "function_call":
             calls[output.get("call_id")] = {
-                "name":output.get("name"),
-                "arguments":output.get("arguments"),
-                "call_id":output.get("call_id")
+                "name": output.get("name"),
+                "arguments": output.get("arguments"),
+                "call_id": output.get("call_id"),
             }
     for output in history[start:]:
         if output.get("type") == "function_call_output":
             call = calls.pop(output.get("call_id"), None)
             if call is not None:
                 tool_result = json.loads(output["output"])
-                result.append({**call, "result":tool_result,"ok":tool_result["ok"], "error":tool_result.get("error")})
+                result.append(
+                    {
+                        **call,
+                        "result": tool_result,
+                        "ok": tool_result["ok"],
+                        "error": tool_result.get("error"),
+                    }
+                )
     for call in calls.values():
-        result.append({**call, "result":None, "ok":None, "error":"结果未记录"})
+        result.append({**call, "result": None, "ok": None, "error": "结果未记录"})
     return result
 
+
 def public_result(
-    session:DiagnosisSession,
-    request:TurnRequest,
-    state:dict,
+    session: DiagnosisSession,
+    request: TurnRequest,
+    state: dict,
     *,
-    run_id:str,
-    history_start:int,
-)->dict:
+    run_id: str,
+    history_start: int,
+) -> dict:
     return {
-        "run_id":run_id,
-        "thread_id":session.thread_id,
-        "case_id":session.case_id,
-        "question":request.question,
-        "status":state["status"],
-        "reason":state["reason"],
-        "report":state["report"],
-        "evidence":dict(state["evidence"]),
-        "clauses":dict(state["clauses"]),
-        "model_rounds":state["model_rounds"],
-        "tool_count":state["tool_count"],
-        "call_trace":collect_calls(state["history"], history_start)
+        "run_id": run_id,
+        "thread_id": session.thread_id,
+        "case_id": session.case_id,
+        "question": request.question,
+        "status": state["status"],
+        "reason": state["reason"],
+        "report": state["report"],
+        "evidence": dict(state["evidence"]),
+        "clauses": dict(state["clauses"]),
+        "model_rounds": state["model_rounds"],
+        "tool_count": state["tool_count"],
+        "call_trace": collect_calls(state["history"], history_start),
+        "summary": state.get("summary"),
+        "context_trace": state.get("context_trace", []),
+        "summary_calls": state.get("summary_calls", 0),
+        "visible_evidence_ids": state.get("visible_evidence_ids", []),
+        "visible_clause_ids": state.get("visible_clause_ids", []),
     }
 
-async def analyze_async(
-        session:DiagnosisSession,
-        request:TurnRequest
-) -> dict:
+
+async def analyze_async(session: DiagnosisSession, request: TurnRequest) -> dict:
     if session.busy:
         raise ValueError("上一问题仍在运行")
     if not session.usable:
@@ -96,10 +110,10 @@ async def analyze_async(
     run_id = uuid4().hex
     config = {
         "configurable": {"thread_id": session.thread_id},
-        "recursion_limit": 2 * request.max_rounds + 4,
+        "recursion_limit": 3 * request.max_rounds + 6,
     }
     previous = session.graph.get_state(config).values
-    history_start = len(previous.get("history",[]))
+    history_start = len(previous.get("history", []))
     session.busy = True
     try:
         client, model = create_client()
@@ -114,26 +128,25 @@ async def analyze_async(
                 toolbox_context = open_toolbox(
                     case_dir=session.case_dir,
                     transport=session.transport,
-                    mcp_url=session.mcp_url
+                    mcp_url=session.mcp_url,
                 )
+            context_policy = ContextPolicy(max_input_bytes=request.max_context_bytes)
             async with toolbox_context as toolbox:
                 state = await session.graph.ainvoke(
-                    {"question":request.question},
+                    {"question": request.question},
                     context=RunContext(
                         client=client,
                         model=model,
                         toolbox=toolbox,
                         max_rounds=request.max_rounds,
-                        max_tool_calls=request.max_tool_calls
+                        max_tool_calls=request.max_tool_calls,
+                        context_policy=context_policy,
                     ),
-                    config=config
+                    config=config,
                 )
+                latest_state = state
         result = public_result(
-            session,
-            request,
-            state,
-            run_id=run_id,
-            history_start=history_start
+            session, request, state, run_id=run_id, history_start=history_start
         )
     except (APIError, ValueError, RuntimeError) as error:
         session.usable = False
@@ -146,41 +159,48 @@ async def analyze_async(
             reason = str(error)
 
         reason += (
-            "；轨迹来自最新检查点；失败节点内尚未提交的操作"
-            "可能未记录，计数可能不完整。"
+            "；轨迹来自最新检查点；失败节点内尚未提交的操作可能未记录，计数可能不完整。"
         )
 
         snapshot = session.graph.get_state(config).values
+        latest_state = snapshot
 
         if len(snapshot.get("history", [])) > history_start:
             failed_state = dict(snapshot)
-            failed_state.update({
-                "status": "failed",
-                "reason": reason,
-                "report": None,
-            })
+            failed_state.update(
+                {
+                    "status": "failed",
+                    "reason": reason,
+                    "report": None,
+                }
+            )
 
             result = public_result(
                 session,
                 request,
                 failed_state,
                 run_id=run_id,
-                history_start=history_start
+                history_start=history_start,
             )
         else:
             result = {
-                "run_id":run_id,
-                "thread_id":session.thread_id,
-                "case_id":session.case_id,
-                "question":request.question,
-                "status":"failed",
-                "reason":reason,
-                "report":None,
-                "evidence":{},
-                "clauses":{},
-                "model_rounds":None,
-                "tool_count":None,
-                "call_trace":[],
+                "run_id": run_id,
+                "thread_id": session.thread_id,
+                "case_id": session.case_id,
+                "question": request.question,
+                "status": "failed",
+                "reason": reason,
+                "report": None,
+                "evidence": {},
+                "clauses": {},
+                "model_rounds": None,
+                "tool_count": None,
+                "call_trace": [],
+                "summary": None,
+                "summary_calls": 0,
+                "context_trace": [],
+                "visible_evidence_ids": [],
+                "visible_clause_ids": [],
             }
     except Exception:
         session.usable = False
@@ -191,12 +211,38 @@ async def analyze_async(
     if result["status"] != "completed":
         session.usable = False
 
+    result["history_archive"] = None
+    new_history = latest_state.get("history", [])[history_start:]
+    if new_history:
+        archive = {
+            "status": "failed",
+            "path": None,
+            "history_range": [history_start, history_start + len(new_history)],
+        }
+        result["history_archive"] = archive
+        try:
+            path = save_history_segment(
+                thread_id=session.thread_id,
+                case_id=session.case_id,
+                run_id=run_id,
+                history_start=history_start,
+                history=new_history,
+                summary=latest_state.get("summary"),
+            )
+        except OSError:
+            result["storage_warning"] = "本问新增历史归档失败"
+        else:
+            archive.update(status="saved", path=path.as_posix())
     try:
         save_result(result)
     except OSError:
-        result["storage_warning"] = "结果文件保存失败，仍可从界面下载"
+        warning = "结果文件保存失败，仍可从界面下载"
+        if result.get("storage_warning"):
+            warning = f"{result['storage_warning']}; {warning}"
+        result["storage_warning"] = warning
     session.turns.append(result)
     return result
+
 
 def analyze(session: DiagnosisSession, request: TurnRequest) -> dict:
     return asyncio.run(analyze_async(session, request))

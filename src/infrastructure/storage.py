@@ -14,6 +14,38 @@ def save_result(result: dict) -> Path:
     return output_file
 
 
+def save_history_segment(
+    *,
+    thread_id: str,
+    case_id: str,
+    run_id: str,
+    history_start: int,
+    history: list[dict],
+    summary: dict | None,
+    output_root: Path = Path("outputs/history"),
+) -> Path:
+    output_dir = output_root / thread_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{run_id}.json"
+
+    segment = {
+        "thread_id": thread_id,
+        "case_id": case_id,
+        "run_id": run_id,
+        "history_range": [history_start, history_start + len(history)],
+        "history": history,
+        "summary": summary,
+    }
+    content = json.dumps(segment, ensure_ascii=False, indent=2)
+
+    with TemporaryDirectory(prefix=".history-", dir=output_dir) as temporary:
+        staged = Path(temporary) / output_file.name
+        staged.write_text(content, encoding="utf-8")
+        staged.replace(output_file)
+
+    return output_file
+
+
 def write_case_snapshot(
     case_id: str,
     files: dict[str, bytes],
