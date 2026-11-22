@@ -188,6 +188,34 @@ def source_ids(history_suffix: list[dict]) -> tuple[set[str], set[str]]:
 
     return evidence_ids, clause_ids
 
+def add_memories_to_input(
+    base_input: list[dict],
+    candidates: list[dict],
+    *,
+    tools: list[dict],
+    instructions: str,
+    limit_bytes: int,
+) -> tuple[list[dict], list[dict]]:
+    """基础输入已经通过预算检查，再逐条尝试加记忆。"""
+    model_input = base_input
+    selected = []
+    for record in candidates:
+        snapshot = {
+            key: deepcopy(record[key])
+            for key in ("memory_id", "kind", "revision", "content", "source")
+        }
+        trial_items = [*selected, snapshot]
+        message = {
+            "role": "user",
+            "content": json.dumps(
+                {"kind": "long_term_memory", "items": trial_items}, ensure_ascii=False
+            ),
+        }
+        trial_input = [message, *base_input]
+        if payload_bytes(trial_input, tools, instructions) <= limit_bytes:
+            selected = trial_items
+            model_input = trial_input
+    return model_input, selected
 
 def build_model_context(
     *,
@@ -196,6 +224,7 @@ def build_model_context(
     instructions: str,
     policy: ContextPolicy,
     summary: dict | None = None,
+    memory_candidates: list[dict] | None = None
 ) -> PreparedContext:
     spans = split_turns(history)
     if not spans or policy.keep_recent_turns < 1:
@@ -219,6 +248,18 @@ def build_model_context(
             can_summarize=can_summarize,
         )
 
+    candidates = memory_candidates or []
+    input_items, selected = add_memories_to_input(
+        input_items,
+        candidates,
+        tools=tools,
+        instructions=instructions,
+        limit_bytes=policy.max_input_bytes,
+    )
+    input_bytes = payload_bytes(input_items, tools, instructions)
+    selected_ids = {item["memory_id"] for item in selected}
+
+
     evidence_ids, clause_ids = source_ids(input_items)
     return PreparedContext(
         input_items=input_items,
@@ -228,6 +269,12 @@ def build_model_context(
             "limit_bytes": limit,
             "history_range": [start, len(history)],
             "summary_until": start,
+            "memory_selected": selected,
+            "memory_skipped": [
+                {"memory_id": item["memory_id"], "reason": "budget"}
+                for item in candidates
+                if item["memory_id"] not in selected_ids
+            ],
         },
         visible_clause_ids=sorted(clause_ids),
         visible_evidence_ids=sorted(evidence_ids),

@@ -5,6 +5,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from src.models.request import Transport
+from src.memory.store import MemoryScope
 
 
 @dataclass
@@ -21,3 +22,7 @@ class DiagnosisSession:
     busy: bool = False
     usable: bool = True
     turns: list[dict] = field(default_factory=list)
+    memory_scope: MemoryScope = field(
+        default_factory=lambda: MemoryScope("local-user", "mqtt-lab", "MQTT")
+    )
+    memory_db_path: Path = Path("outputs/memory/memories.sqlite3")

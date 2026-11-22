@@ -14,11 +14,12 @@ def main() -> int:
     )
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8000/mcp")
     parser.add_argument("--context-bytes", type=int, default=128_000)
+    parser.add_argument("--mqtt-version", choices=("3.1.1", "5.0"))
     args = parser.parse_args()
     try:
         session = create_session(
             CaseConfig(
-                case_dir=args.case_dir, transport=args.transport, mcp_url=args.mcp_url
+                case_dir=args.case_dir, transport=args.transport, mcp_url=args.mcp_url, mqtt_version=args.mqtt_version
             )
         )
     except ValueError:

@@ -9,6 +9,10 @@ from src.models.request import CaseConfig, TurnRequest
 from src.application.cases import materialize_case
 from src.models.request import CaseUpload, UploadedLog
 
+import sqlite3
+from src.application.memory import confirm_experience, propose_experience
+from openai import APIError
+
 st.set_page_config(page_title="通信诊断助手", layout="wide")
 st.title("通信诊断助手")
 
@@ -23,6 +27,11 @@ with st.form("case_config"):
     case_dir_text = st.text_input("案例目录", "samples/case-01")
     transport = st.selectbox("工具连接", ["mcp-http", "mcp-stdio", "local"])
     mcp_url = st.text_input("HTTP MCP 地址", "http://127.0.0.1:8000/mcp")
+    mqtt_version = st.selectbox(
+        "MQTT 版本",
+        [None, "3.1.1", "5.0"],
+        format_func=lambda version: version or "未知",
+    )
     new_session = st.form_submit_button("新建会话")
 
 if new_session:
@@ -48,7 +57,12 @@ if new_session:
         else:
             case_dir = Path(case_dir_text)
 
-        config = CaseConfig(case_dir=case_dir, transport=transport, mcp_url=mcp_url)
+        config = CaseConfig(
+            case_dir=case_dir,
+            transport=transport,
+            mcp_url=mcp_url,
+            mqtt_version=mqtt_version,
+        )
         session = create_session(config)
 
         st.session_state.diagnosis_session = session
@@ -124,6 +138,9 @@ for index, result in enumerate(session.turns, start=1):
     if result.get("storage_warning"):
         st.warning(result["storage_warning"])
 
+    if result.get("memory_warning"):
+        st.warning(result["memory_warning"])
+
     with st.expander("查看本问题上下文与预算"):
         st.json(
             {
@@ -133,8 +150,37 @@ for index, result in enumerate(session.turns, start=1):
                 "visible_clause_ids": result.get("visible_clause_ids", []),
                 "history_archive": result.get("history_archive"),
                 "context_trace": result.get("context_trace", []),
+                "memory_inputs": result.get("memory_inputs", [])
             }
         )
+
+    if result["status"] == "completed":
+        run_id = result["run_id"]
+        with st.expander("保存为历史经验"):
+            st.caption(f"来源案例 {result['case_id']} · 诊断 {run_id}")
+            if st.button("生成经验草稿", key=f"experience-draft-{run_id}"):
+                try:
+                    draft = propose_experience(session, run_id)
+                except (APIError, ValueError):
+                    st.error("草稿生成失败，可以手工填写。")
+                else:
+                    st.session_state[f"experience-content-{run_id}"] = draft.content
+                    st.session_state[f"experience-keywords-{run_id}"] = ", ".join(draft.keywords)
+            with st.form(key=f"experience-form-{run_id}"):
+                content = st.text_area("下次可以复用的检查动作", key=f"experience-content-{run_id}")
+                keyword_text = st.text_input("关键词，用逗号分隔", key=f"experience-keywords-{run_id}")
+                confirmed = st.form_submit_button("确认写入长期记忆")
+
+            if confirmed:
+                try:
+                    memory_id = confirm_experience(session, run_id, content, keyword_text)
+                except ValueError as error:
+                    st.error(str(error))
+                except (OSError, sqlite3.Error):
+                    st.error("记忆写入失败，检查数据库路径和权限后再试。")
+                else:
+                    st.success(f"已保存记录 {memory_id}")
+
 
     st.download_button(
         "下载本次报告与轨迹",

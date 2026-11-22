@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "调试通信诊断助手",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "module": "streamlit",
+      "args": ["run", "${workspaceFolder}/src/ui/app.py", "--server.address", "127.0.0.1"],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "调试 MCP 服务端",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "module": "src.tools.server",
+      "args": ["--transport", "http", "--port", "8000", "--case-dir", "${workspaceFolder}/samples/case-01"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "调试助手 + MCP",
+      "configurations": ["调试通信诊断助手", "调试 MCP 服务端"],
+      "stopAll": true
+    }
+  ]
+}

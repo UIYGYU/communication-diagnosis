@@ -14,6 +14,7 @@ class CaseConfig(BaseModel):
     case_dir: Path
     transport: Transport = "mcp-http"
     mcp_url: str = "http://127.0.0.1:8000/mcp"
+    mqtt_version: Literal["3.1.1", "5.0"] | None = None
 
 
 class TurnRequest(BaseModel):

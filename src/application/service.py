@@ -1,6 +1,7 @@
 import asyncio
 import json
 from uuid import uuid4
+import sqlite3
 
 from langgraph.checkpoint.memory import InMemorySaver
 from openai import APIError
@@ -14,6 +15,8 @@ from src.orchestration.graph import RunContext, build_graph
 from src.orchestration.context import ContextPolicy
 from src.tools.client import open_local_toolbox, open_toolbox
 from src.tools.local import LocalTools
+from pathlib import Path
+from src.memory.store import MemoryScope, find_memories
 
 
 def create_session(config: CaseConfig) -> DiagnosisSession:
@@ -32,6 +35,13 @@ def create_session(config: CaseConfig) -> DiagnosisSession:
         mcp_url=config.mcp_url,
         saver=saver,
         graph=graph,
+        memory_scope=MemoryScope(
+            user_id="local-user",
+            project_id="mqtt-lab",
+            protocol="MQTT",
+            protocol_version=config.mqtt_version,
+        ),
+        memory_db_path=Path("outputs/memory/memories.sqlite3").resolve(),
     )
 
 
@@ -115,7 +125,19 @@ async def analyze_async(session: DiagnosisSession, request: TurnRequest) -> dict
     previous = session.graph.get_state(config).values
     history_start = len(previous.get("history", []))
     session.busy = True
+    memory_candidates = []
+    memory_warning = None
     try:
+        try:
+            if session.memory_db_path.is_file():
+                memory_candidates = await asyncio.to_thread(
+                    find_memories,
+                    session.memory_db_path,
+                    session.memory_scope,
+                    request.question,
+                )
+        except (OSError, sqlite3.Error):
+            memory_warning = "长期记忆读取失败，本问使用已有对话和工具资料。"
         client, model = create_client()
         with client:
             if not session.model_id:
@@ -141,6 +163,7 @@ async def analyze_async(session: DiagnosisSession, request: TurnRequest) -> dict
                         max_rounds=request.max_rounds,
                         max_tool_calls=request.max_tool_calls,
                         context_policy=context_policy,
+                        memory_candidates=memory_candidates
                     ),
                     config=config,
                 )
@@ -233,6 +256,16 @@ async def analyze_async(session: DiagnosisSession, request: TurnRequest) -> dict
             result["storage_warning"] = "本问新增历史归档失败"
         else:
             archive.update(status="saved", path=path.as_posix())
+    answered_rounds = result["model_rounds"] or 0
+
+    result["memory_inputs"] = [
+        {"model_round": row["model_round"], "items": row["memory_selected"]}
+        for row in result["context_trace"]
+        if row.get("kind") == "context"
+        and 0 < row.get("model_round", 0) <= answered_rounds
+        and row.get("memory_selected")
+    ]
+    result["memory_warning"] = memory_warning
     try:
         save_result(result)
     except OSError:

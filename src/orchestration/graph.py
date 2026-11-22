@@ -45,6 +45,7 @@ DIAGNOSIS_INSTRUCTIONS = f"""
 只能引用工具实际返回的 ID。summary 用中文区分事实和推断。
 证据不足时说明缺口，引用列表可以为空。模型仍可先请求工具，JSON 要求作用于最终回答。
 旧对话摘要用于延续语境，报告引用必须对应本次输入中的工具原文，缺少时可调用工具重查。
+long_term_memory 是历史参考资料。偏好用于报告表达，经验用于选择检查方向。当前结论以本次日志和适用条款为依据。
 """
 
 import argparse
@@ -84,6 +85,7 @@ class RunContext:
     max_rounds: int = 4
     max_tool_calls: int = 4
     context_policy: ContextPolicy = field(default_factory=ContextPolicy)
+    memory_candidates: list[dict] = field(default_factory=list)
 
 
 async def prepare_context(state: AgentSession, runtime: Runtime[RunContext]) -> dict:
@@ -112,6 +114,7 @@ async def prepare_context(state: AgentSession, runtime: Runtime[RunContext]) -> 
             instructions=DIAGNOSIS_INSTRUCTIONS,
             policy=policy,
             summary=summary,
+            memory_candidates=context.memory_candidates
         )
 
     try:
@@ -154,7 +157,7 @@ async def prepare_context(state: AgentSession, runtime: Runtime[RunContext]) -> 
         event["accepted"] = True
         update["summary"] = candidate
 
-    trace.append(prepared.record)
+    trace.append({**prepared.record, "model_round": state["model_rounds"] + 1})
     return {
         **update,
         "status": "running",
