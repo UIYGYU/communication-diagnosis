@@ -14,10 +14,10 @@ from pydantic import ValidationError
 
 from src.tools.contracts import ARGUMENT_MODELS, TOOLS
 from src.tools.local import LocalTools
+import os
 
 TIMEOUT_SECONDS = 15
 DEFAULT_MCP_URL = "http://127.0.0.1:8000/mcp"
-
 
 def tool_error(code: str, message: str) -> dict:
     return {"ok": False, "error": code, "message": message}
@@ -78,8 +78,63 @@ class MCPTools:
         self.transport = transport
         self.tools = deepcopy(TOOLS)
         self.expected_files = manifest["files"]
+        self._remote_clients: dict[str, Client] = {}
+
+    async def add_remote_tools(self, client: Client) -> None:
+        names = {tool["name"] for tool in self.tools}
+        cursor = None
+        while True:
+            listed = await client.list_tools(cursor=cursor)
+            for tool in listed.tools:
+                if tool.name in names:
+                    raise ValueError(f"MCP 工具重名：{tool.name}")
+                names.add(tool.name)
+                self.tools.append(
+                    {
+                        "type": "function",
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "parameters": tool.input_schema,
+                        "strict": False,
+                    }
+                )
+                self._remote_clients[tool.name] = client
+
+            cursor = listed.next_cursor
+            if cursor is None:
+                return
+
+    async def _call_remote(self, name:str, arguments:str) -> dict:
+        try:
+            params = json.loads(arguments)
+        except json.JSONDecodeError:
+            return tool_error("invalid_arguments", "工具参数需要是 JSON 对象。")
+        if not isinstance(params, dict):
+            return tool_error("invalid_arguments", "工具参数需要是 JSON 对象。")
+
+        try:
+            async with asyncio.timeout(TIMEOUT_SECONDS):
+                result = await self._remote_clients[name].call_tool(name, params)
+        except TimeoutError:
+            return tool_error("mcp_timeout", "MCP 工具调用超时。")
+        except Exception:
+            return tool_error("mcp_failed", "MCP 工具通信失败。")
+
+        data = result.structured_content
+        if not result.is_error and isinstance(data, dict):
+            return {"ok": True, **data}
+
+        payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if result.is_error:
+            return {
+                **tool_error("mcp_tool_error", "MCP 服务端报告工具错误。"),
+                "response": payload,
+            }
+        return {"ok": True, "response": payload}
 
     async def call(self, name: str, arguments: str) -> dict:
+        if name in self._remote_clients:
+            return await self._call_remote(name, arguments)        
         model = ARGUMENT_MODELS.get(name)
         if not model:
             return tool_error("unknown_tool", "未知工具")
@@ -173,6 +228,16 @@ class MCPTools:
 
 
 @asynccontextmanager
+async def _open_mcp_client(
+    target: str | StdioServerParameters,
+    *,
+    read_timeout_seconds: float = TIMEOUT_SECONDS,
+) -> AsyncGenerator[Client, None]:
+    async with Client(target, read_timeout_seconds=read_timeout_seconds) as client:
+        yield client
+
+
+@asynccontextmanager
 async def open_toolbox(
     case_dir: Path,
     *,
@@ -225,9 +290,7 @@ async def open_toolbox(
     async with AsyncExitStack() as stack:
         try:
             async with asyncio.timeout(TIMEOUT_SECONDS):
-                client = await stack.enter_async_context(
-                    Client(target, read_timeout_seconds=TIMEOUT_SECONDS)
-                )
+                client = await stack.enter_async_context(_open_mcp_client(target))
                 listed = await client.list_tools()
                 validate_discovered_tools(listed)
                 resource = await client.read_resource("diagnosis://case-manifest")
@@ -242,6 +305,13 @@ async def open_toolbox(
                 actual_manifest = json.loads(text)
                 if actual_manifest != expected_manifest:
                     raise ValueError("服务端案例文件与本地输入不一致。")
+
+                toolbox = MCPTools(
+                    client, transport=transport, manifest=expected_manifest
+                )
+                for url in os.getenv("DIAGNOSIS_EXTRA_MCP_URLS", "").split():
+                    remote = await stack.enter_async_context(_open_mcp_client(url))
+                    await toolbox.add_remote_tools(remote)
         except NotImplementedError as error:
             failure = error
         except ValueError as error:
@@ -250,7 +320,7 @@ async def open_toolbox(
             failure = RuntimeError("MCP 连接或发现失败，请检查服务、地址和案例。")
         if failure is None:
             try:
-                yield MCPTools(client, transport=transport, manifest=expected_manifest)
+                yield toolbox
             except Exception as error:
                 failure = error
     if failure is not None:
@@ -305,7 +375,6 @@ async def check_connection(
             raise RuntimeError("未知工具未按预期被拒绝。")
 
     print("连通验证完成；HTTP 服务会继续运行。本步骤未请求模型。")
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="验证 MCP 工具连接")
