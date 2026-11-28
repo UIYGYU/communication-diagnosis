@@ -21,6 +21,39 @@
       "args": ["--transport", "http", "--port", "8000", "--case-dir", "${workspaceFolder}/samples/case-01"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal"
+    },
+    {
+      "name": "调试 MQTT 实验（含抓包）",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "module": "src.infrastructure.mqtt_lab",
+      "args": ["normal", "--capture"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "调试实验 MCP 服务端",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "module": "src.tools.experiment_server",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "挂上额外实验服务并启动诊断 CLI",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "module": "src.application.cli",
+      "args":["--transport", "mcp-stdio", "--case-dir", "samples/case-01","--max-rounds", "10", "--max-tool-calls", "12"],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "DIAGNOSIS_EXTRA_MCP_URLS": "http://127.0.0.1:8001/mcp"
+      },
+      "console": "integratedTerminal"
     }
   ],
   "compounds": [

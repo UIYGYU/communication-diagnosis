@@ -46,6 +46,8 @@ DIAGNOSIS_INSTRUCTIONS = f"""
 证据不足时说明缺口，引用列表可以为空。模型仍可先请求工具，JSON 要求作用于最终回答。
 旧对话摘要用于延续语境，报告引用必须对应本次输入中的工具原文，缺少时可调用工具重查。
 long_term_memory 是历史参考资料。偏好用于报告表达，经验用于选择检查方向。当前结论以本次日志和适用条款为依据。
+若问题要求复现实验或核对网络报文，可调用实验工具（需要报文时设 capture=true），待状态为 completed 后再读取本次实验日志与抓包帧。
+日志行 ID（E-...）与抓包帧 ID（F-...）均填入 evidence_ids；联合报告须分别说明日志事实、报文帧事实、协议依据与证据缺口（如未开启抓包、截断或时间未对齐）。
 """
 
 import argparse
@@ -288,17 +290,32 @@ async def execute_tools(state: AgentSession, runtime: Runtime[RunContext]) -> di
             }
         )
         if result.get("ok") is True:
-            if call["name"] == "read_log":
-                for line in result["lines"]:
-                    evidence[line["evidence_id"]] = {
+            if call["name"] in ("read_log", "read_experiment_log"):
+                for line in result.get("lines", []):
+                    record = {
                         **line,
                         "role": result["role"],
                         "file": result["file"],
                         "input_sha256": result["input_sha256"],
                         "read_truncated": result["truncated"],
                     }
+                    if "run_id" in result:
+                        record["run_id"] = result["run_id"]
+                    evidence[line["evidence_id"]] = record
+            elif call["name"] == "read_experiment_frames":
+                for frame in result.get("frames", []):
+                    evidence[frame["evidence_id"]] = {
+                        **frame,
+                        "kind": "frame",
+                        "run_id": result.get("run_id"),
+                        "file": result["file"],
+                        "input_sha256": result["input_sha256"],
+                        "interface": result["interface"],
+                        "capture_filter": result["capture_filter"],
+                        "read_truncated": result["truncated"],
+                    }
             elif call["name"] == "search_protocol":
-                for clause in result["clauses"]:
+                for clause in result.get("clauses", []):
                     clauses[clause["clause_id"]] = dict(clause)
 
     return {

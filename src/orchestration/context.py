@@ -172,18 +172,26 @@ def source_ids(history_suffix: list[dict]) -> tuple[set[str], set[str]]:
             continue
 
         name = tool_names.get(item["call_id"])
-        if name not in ("read_log", "search_protocol"):
+        if name not in (
+            "read_log",
+            "read_experiment_log",
+            "read_experiment_frames",
+            "search_protocol",
+        ):
             continue
 
         result = json.loads(item["output"])
         if result.get("ok") is not True:
             continue
 
-        if name == "read_log":
-            for line in result["lines"]:
+        if name in ("read_log", "read_experiment_log"):
+            for line in result.get("lines", []):
                 evidence_ids.add(line["evidence_id"])
+        elif name == "read_experiment_frames":
+            for frame in result.get("frames", []):
+                evidence_ids.add(frame["evidence_id"])
         else:
-            for clause in result["clauses"]:
+            for clause in result.get("clauses", []):
                 clause_ids.add(clause["clause_id"])
 
     return evidence_ids, clause_ids

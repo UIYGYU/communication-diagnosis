@@ -21,6 +21,8 @@ TOPIC = "lab/status"
 OTHER_TOPIC = "lab/alarm"
 MESSAGE = "communication-diagnosis-v2"
 LABEL = "communication-diagnosis.run"
+CAPTURE_IMAGE = "communication-diagnosis-capture:local"
+CAPTURE_LABEL = "communication-diagnosis.capture"
 BROKER_CONFIG = """listener 1883 127.0.0.1
 allow_anonymous true
 persistence false
@@ -53,12 +55,16 @@ def broker_log(container: str) -> str:
 def wait_for_log(container: str, pattern: str, *, timeout: float = 8) -> None:
     deadline = time.monotonic() + timeout
     while (remaining := deadline - time.monotonic()) > 0:
-        result = docker("logs", "--timestamps", container, timeout=remaining)
-        require_zero(result, "检查 broker 就绪")
-        if re.search(pattern, result.stdout, re.MULTILINE):
+        try:
+            result = docker("logs", "--timestamps", container, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            break
+        require_zero(result, "检查容器就绪")
+        combined = f"{result.stdout}\n{result.stderr}"
+        if re.search(pattern, combined, re.MULTILINE):
             return
         time.sleep(min(0.1, remaining))
-    raise TimeoutError(f"等待 broker 日志超时：{pattern}")
+    raise TimeoutError(f"等待容器日志超时：{pattern}")
 
 def write_client_log(
     path: Path,
@@ -111,6 +117,79 @@ def remove_own_container(container_id: str | None, run_id: str) -> None:
         container_id = ids[0]
     require_zero(docker("rm", "--force", "--volumes", container_id), "清理本次容器")
 
+
+def start_capture_container(broker_id: str, run_id: str) -> str:
+    """与本次 broker 共享网络命名空间，在 lo 上捕获 TCP 1883。"""
+    created = docker(
+        "run",
+        "--detach",
+        "--pull",
+        "never",
+        "--network",
+        f"container:{broker_id}",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "NET_RAW",
+        "--stop-signal",
+        "SIGINT",
+        "--label",
+        f"{CAPTURE_LABEL}={run_id}",
+        CAPTURE_IMAGE,
+        "/usr/local/bin/lab-dumpcap",
+        "-i",
+        "lo",
+        "-p",
+        "-q",
+        "-f",
+        "tcp port 1883",
+        "-a",
+        "duration:20",
+        "-a",
+        "filesize:1024",
+        "-w",
+        "/tmp/mqtt.pcapng",
+        timeout=15,
+    )
+    require_zero(created, "启动本次抓包容器")
+    capture_id = created.stdout.strip()
+    wait_for_log(capture_id, r"File:\s+/tmp/mqtt\.pcapng", timeout=8)
+    return capture_id
+
+
+def stop_and_collect_capture(
+    capture_id: str | None, run_id: str, output: Path
+) -> None:
+    """优雅停止抓包容器、复制 PCAPNG 文件并清理容器。"""
+    if capture_id is None:
+        found = docker(
+            "ps", "--all", "--quiet", "--filter", f"label={CAPTURE_LABEL}={run_id}"
+        )
+        require_zero(found, "核对本次抓包容器")
+        ids = found.stdout.split()
+        if not ids:
+            return
+        if len(ids) != 1:
+            raise RuntimeError("本次运行标记对应多个抓包容器，请核对后清理")
+        capture_id = ids[0]
+
+    try:
+        # 留出短暂缓冲窗口，让 libpcap 将最后几毫秒的 PUBLISH/PUBACK/DISCONNECT 帧
+        # 从内核环形缓冲刷入 Dumpcap，再发 SIGINT 优雅停机。
+        time.sleep(0.6)
+        stop_result = docker("stop", "--timeout", "5", capture_id, timeout=10)
+        require_zero(stop_result, "停止本次抓包容器")
+        if not output.exists():
+            copied = docker(
+                "cp", f"{capture_id}:/tmp/mqtt.pcapng", str(output), timeout=10
+            )
+            require_zero(copied, "复制本次抓包文件")
+    finally:
+        require_zero(
+            docker("rm", "--force", "--volumes", capture_id, timeout=10),
+            "清理本次抓包容器",
+        )
+
 class ExperimentCancelled(Exception):
     """运行器收到取消请求，正在走原有的清理流程。"""
 
@@ -125,6 +204,7 @@ def run_case(
     run_id: str,
     scenario: str,
     *,
+    capture: bool = False,
     cancel: Event | None = None,
 ):
     if scenario not in {"normal", "topic-mismatch"}:
@@ -133,8 +213,11 @@ def run_case(
     config = case_dir / "mosquitto.conf"
     config.write_text(BROKER_CONFIG, encoding="utf-8")
     subscriber_log = case_dir / "subscriber.json"
+    capture_path = case_dir / "mqtt.pcapng"
     sub_topic = OTHER_TOPIC if scenario == "topic-mismatch" else TOPIC
     container_id = None
+    capture_id = None
+    capture_attempted = False
     sub_process = None
     try:
         check_cancelled(cancel)
@@ -160,6 +243,10 @@ def run_case(
         require_zero(created, "启动本次 broker 容器")
         container_id = created.stdout.strip()
         wait_for_log(container_id, r"mosquitto version [^\r\n]+ running$")
+        if capture:
+            check_cancelled(cancel)
+            capture_attempted = True
+            capture_id = start_capture_container(container_id, run_id)
         common = ["-h", "127.0.0.1", "-V", "mqttv5", "-d", "-q", "1"]
         sub_command = [
             *DOCKER,
@@ -229,6 +316,8 @@ def run_case(
                         stdout,
                         stderr,
                     )
+                if capture_attempted:
+                    stop_and_collect_capture(capture_id, run_id, capture_path)
                 if container_id is not None:
                     (case_dir / "broker.log").write_text(
                         broker_log(container_id), encoding="utf-8"
@@ -245,6 +334,9 @@ def main() -> int:
     parser.add_argument(
         "scenario", nargs="?", choices=("normal", "topic-mismatch"), default="normal"
     )
+    parser.add_argument(
+        "--capture", action="store_true", help="同时抓取实验 lo 接口上的 TCP 1883 报文"
+    )
     args = parser.parse_args()
     run_id = uuid4().hex
     case_dir = (Path("outputs") / "mqtt-lab" / run_id).resolve()
@@ -253,6 +345,7 @@ def main() -> int:
     record = {
         "run_id": run_id,
         "scenario": args.scenario,
+        "capture": args.capture,
         "image": IMAGE,
         "mqtt_version": "5.0",
         "started_at": datetime.now(UTC).isoformat(),
@@ -262,7 +355,7 @@ def main() -> int:
     }
     exit_code = 1
     try:
-        run_case(case_dir, run_id, args.scenario)
+        run_case(case_dir, run_id, args.scenario, capture=args.capture)
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         record["status"] = "failed"
         record["error"] = str(error)

@@ -14,6 +14,8 @@ def main() -> int:
     )
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8000/mcp")
     parser.add_argument("--context-bytes", type=int, default=128_000)
+    parser.add_argument("--max-rounds", type=int, default=6)
+    parser.add_argument("--max-tool-calls", type=int, default=8)
     parser.add_argument("--mqtt-version", choices=("3.1.1", "5.0"))
     args = parser.parse_args()
     try:
@@ -31,7 +33,10 @@ def main() -> int:
             return 0
         try:
             request = TurnRequest(
-                question=question, max_context_bytes=args.context_bytes
+                question=question,
+                max_rounds=args.max_rounds,
+                max_tool_calls=args.max_tool_calls,
+                max_context_bytes=args.context_bytes,
             )
         except ValueError as error:
             print(f"问题输入有误：{error}")
